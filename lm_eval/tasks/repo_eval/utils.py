@@ -9,6 +9,8 @@ import json
 import re
 from typing import Dict, Any, List
 import datasets
+from lm_eval.api import registry
+from lm_eval.api.registry import register_metric
 
 
 def process_defined_in_docs(dataset: datasets.Dataset) -> datasets.Dataset:
@@ -269,3 +271,18 @@ def belongs_to_partial_match(predictions: List[str], references: List[str]) -> f
             pass
 
     return correct / total if total > 0 else 0.0
+
+
+# Register metrics exactly once to prevent duplicate-registration assertions when
+# YAML task configs import this module multiple times via spec_from_file_location
+if "defined_in_exact_match" not in registry.METRIC_REGISTRY:
+    register_metric(metric="defined_in_exact_match", higher_is_better=True)(defined_in_exact_match)
+
+if "defined_in_partial_match" not in registry.METRIC_REGISTRY:
+    register_metric(metric="defined_in_partial_match", higher_is_better=True)(defined_in_partial_match)
+
+if "belongs_to_exact_match" not in registry.METRIC_REGISTRY:
+    register_metric(metric="belongs_to_exact_match", higher_is_better=True)(belongs_to_exact_match)
+
+if "belongs_to_partial_match" not in registry.METRIC_REGISTRY:
+    register_metric(metric="belongs_to_partial_match", higher_is_better=True)(belongs_to_partial_match)

@@ -14,7 +14,10 @@ process_docs: !function utils.process_belongs_to_docs
 doc_to_text: "{{prompt}}"
 doc_to_target: "{{expected_outputs_json}}"
 metric_list:
-  - metric: exact_match
+  - metric: belongs_to_exact_match
+    aggregation: mean
+    higher_is_better: true
+  - metric: belongs_to_partial_match
     aggregation: mean
     higher_is_better: true
 generation_kwargs:
