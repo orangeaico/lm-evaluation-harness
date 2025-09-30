@@ -1,12 +1,13 @@
 tag:
   - code_understanding
   - repo_eval
-task: repo_eval_belongs_to
+  - single_commit
+task: repo_eval_belongs_to_single_commit
 dataset_path: json
 dataset_name: null
 dataset_kwargs:
   data_files:
-    test: "/home/surya/livup/repo_eval/data/tasks/*/*/BelongsTo.jsonl"
+    test: "/home/surya/livup/repo_eval/data/tasks/xarray/3aa75c8d00a4a2d4acf10d80f76b937cadb666b7/BelongsTo.jsonl"
 output_type: generate_until
 test_split: test
 process_docs: !function utils.process_belongs_to_docs
@@ -26,4 +27,5 @@ repeats: 1
 num_fewshot: 0
 metadata:
   version: 1.0
-  description: "Code identification task: Given a code chunk, identify the file path and component where it belongs"
+  commit_hash: "3aa75c8d00a4a2d4acf10d80f76b937cadb666b7"
+  description: "Code identification task for single commit: 3aa75c8d"
