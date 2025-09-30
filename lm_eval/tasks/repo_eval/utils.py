@@ -167,9 +167,8 @@ def defined_in_exact_match(predictions: List[str], references: List[str]) -> flo
             pred_json = _parse_model_output(pred)
             ref_json = json.loads(ref)
 
-            # Check if all required fields match exactly
-            if (pred_json.get("absolute_path") == ref_json.get("absolute_path") and
-                pred_json.get("filename") == ref_json.get("filename") and
+            # Check if all required fields match exactly (filename and class)
+            if (pred_json.get("filename") == ref_json.get("filename") and
                 pred_json.get("class") == ref_json.get("class")):
                 correct += 1
 
@@ -182,7 +181,7 @@ def defined_in_exact_match(predictions: List[str], references: List[str]) -> flo
 
 def defined_in_partial_match(predictions: List[str], references: List[str]) -> float:
     """
-    Calculate partial match accuracy for DefinedIn task (path-only match).
+    Calculate partial match accuracy for DefinedIn task (filename-only match).
 
     Args:
         predictions: List of model predictions
@@ -199,8 +198,8 @@ def defined_in_partial_match(predictions: List[str], references: List[str]) -> f
             pred_json = _parse_model_output(pred)
             ref_json = json.loads(ref)
 
-            # Check if absolute_path matches (most important field)
-            if pred_json.get("absolute_path") == ref_json.get("absolute_path"):
+            # Check if filename matches (most important field)
+            if pred_json.get("filename") == ref_json.get("filename"):
                 correct += 1
 
         except (json.JSONDecodeError, AttributeError):
@@ -229,9 +228,10 @@ def belongs_to_exact_match(predictions: List[str], references: List[str]) -> flo
             pred_json = _parse_model_output(pred)
             ref_json = json.loads(ref)
 
-            # Check if both fields match exactly
-            if (pred_json.get("absolute_path") == ref_json.get("absolute_path") and
-                pred_json.get("component_path") == ref_json.get("component_path")):
+            # Check if all fields match exactly (filename, class, method)
+            if (pred_json.get("filename") == ref_json.get("filename") and
+                pred_json.get("class") == ref_json.get("class") and
+                pred_json.get("method") == ref_json.get("method")):
                 correct += 1
 
         except (json.JSONDecodeError, AttributeError):
@@ -243,7 +243,7 @@ def belongs_to_exact_match(predictions: List[str], references: List[str]) -> flo
 
 def belongs_to_partial_match(predictions: List[str], references: List[str]) -> float:
     """
-    Calculate partial match accuracy for BelongsTo task (path-only match).
+    Calculate partial match accuracy for BelongsTo task (filename-only match).
 
     Args:
         predictions: List of model predictions
@@ -260,8 +260,8 @@ def belongs_to_partial_match(predictions: List[str], references: List[str]) -> f
             pred_json = _parse_model_output(pred)
             ref_json = json.loads(ref)
 
-            # Check if absolute_path matches (most important field)
-            if pred_json.get("absolute_path") == ref_json.get("absolute_path"):
+            # Check if filename matches (most important field)
+            if pred_json.get("filename") == ref_json.get("filename"):
                 correct += 1
 
         except (json.JSONDecodeError, AttributeError):

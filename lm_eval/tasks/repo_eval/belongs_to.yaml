@@ -25,7 +25,7 @@ generation_kwargs:
   temperature: 0.0
   max_gen_toks: 200
 repeats: 1
-num_fewshot: 2
+num_fewshot: 0
 metadata:
   version: 1.0
   description: "Code identification task: Given a code chunk, identify the file path and component where it belongs"
