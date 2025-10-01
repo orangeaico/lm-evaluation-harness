@@ -2,6 +2,8 @@ group: repo_eval
 task:
   - repo_eval_defined_in
   - repo_eval_belongs_to
+  - repo_eval_calls_what
+  - repo_eval_called_by
 aggregate_metric_list:
   - metric: defined_in_exact_match
     aggregation: mean
@@ -13,6 +15,18 @@ aggregate_metric_list:
     aggregation: mean
     weight_by_size: true
   - metric: belongs_to_partial_match
+    aggregation: mean
+    weight_by_size: true
+  - metric: calls_what_exact_match
+    aggregation: mean
+    weight_by_size: true
+  - metric: calls_what_partial_match
+    aggregation: mean
+    weight_by_size: true
+  - metric: called_by_exact_match
+    aggregation: mean
+    weight_by_size: true
+  - metric: called_by_partial_match
     aggregation: mean
     weight_by_size: true
 metadata:

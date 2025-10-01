@@ -1,0 +1,32 @@
+tag:
+  - code_understanding
+  - repo_eval
+task: repo_eval_called_by
+dataset_path: json
+dataset_name: null
+dataset_kwargs:
+  data_files:
+    test: "/home/surya/livup/repo_eval/data/tasks/*/*/CalledBy.jsonl"
+output_type: generate_until
+test_split: test
+process_docs: !function utils.process_called_by_docs
+doc_to_text: "{{prompt}}"
+doc_to_target: "{{expected_outputs_json}}"
+metric_list:
+  - metric: called_by_exact_match
+    aggregation: mean
+    higher_is_better: true
+  - metric: called_by_partial_match
+    aggregation: mean
+    higher_is_better: true
+generation_kwargs:
+  until:
+    - "<|im_end|>"
+  do_sample: false
+  temperature: 0.0
+  max_gen_toks: 2000
+repeats: 1
+num_fewshot: 0
+metadata:
+  version: 1.0
+  description: "Call graph analysis task: Given a function/method name, identify what functions call it"

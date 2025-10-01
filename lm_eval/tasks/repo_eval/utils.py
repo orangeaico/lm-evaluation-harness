@@ -67,6 +67,60 @@ def process_belongs_to_docs(dataset: datasets.Dataset) -> datasets.Dataset:
     return dataset.map(_process_doc)
 
 
+def process_calls_what_docs(dataset: datasets.Dataset) -> datasets.Dataset:
+    """
+    Process CallsWhat task documents for lm-eval format.
+
+    Args:
+        dataset: Raw dataset from JSONL files
+
+    Returns:
+        Processed dataset with expected format
+    """
+    def _process_doc(doc):
+        # Convert expected outputs to JSON string for comparison
+        expected_outputs_json = json.dumps(doc["expected_outputs"], sort_keys=True)
+
+        return {
+            "prompt": doc["prompt"],
+            "expected_outputs": doc["expected_outputs"],
+            "expected_outputs_json": expected_outputs_json,
+            "task_id": doc["task_id"],
+            "repo_name": doc["repo_name"],
+            "commit_hash": doc["commit_hash"],
+            "difficulty_level": doc.get("difficulty_level", "unknown")
+        }
+
+    return dataset.map(_process_doc)
+
+
+def process_called_by_docs(dataset: datasets.Dataset) -> datasets.Dataset:
+    """
+    Process CalledBy task documents for lm-eval format.
+
+    Args:
+        dataset: Raw dataset from JSONL files
+
+    Returns:
+        Processed dataset with expected format
+    """
+    def _process_doc(doc):
+        # Convert expected outputs to JSON string for comparison
+        expected_outputs_json = json.dumps(doc["expected_outputs"], sort_keys=True)
+
+        return {
+            "prompt": doc["prompt"],
+            "expected_outputs": doc["expected_outputs"],
+            "expected_outputs_json": expected_outputs_json,
+            "task_id": doc["task_id"],
+            "repo_name": doc["repo_name"],
+            "commit_hash": doc["commit_hash"],
+            "difficulty_level": doc.get("difficulty_level", "unknown")
+        }
+
+    return dataset.map(_process_doc)
+
+
 class ExtractJSONFilter:
     """Filter class to extract JSON from model responses."""
 
@@ -273,6 +327,200 @@ def belongs_to_partial_match(predictions: List[str], references: List[str]) -> f
     return correct / total if total > 0 else 0.0
 
 
+def calls_what_exact_match(predictions: List[str], references: List[str]) -> float:
+    """
+    Calculate exact match accuracy for CallsWhat task.
+    Score = (number of correctly predicted calls) / (total ground truth calls)
+
+    Args:
+        predictions: List of model predictions
+        references: List of reference JSON strings
+
+    Returns:
+        Average ratio of correctly predicted calls (0.0 to 1.0)
+    """
+    total_scores = []
+
+    for pred, ref in zip(predictions, references):
+        try:
+            pred_json = _parse_model_output(pred)
+            ref_json = json.loads(ref)
+
+            pred_calls = pred_json.get("calls", [])
+            ref_calls = ref_json.get("calls", [])
+
+            if not ref_calls:
+                # If no ground truth calls, score is 1.0 if prediction is also empty
+                score = 1.0 if not pred_calls else 0.0
+            else:
+                # Count how many ground truth calls are correctly predicted (exact match)
+                correct_count = 0
+                for ref_call in ref_calls:
+                    for pred_call in pred_calls:
+                        if (pred_call.get("filename") == ref_call.get("filename") and
+                            pred_call.get("class") == ref_call.get("class") and
+                            pred_call.get("method") == ref_call.get("method")):
+                            correct_count += 1
+                            break
+
+                score = correct_count / len(ref_calls)
+
+            total_scores.append(score)
+
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            # Prediction couldn't be parsed as JSON or has wrong structure
+            total_scores.append(0.0)
+
+    return sum(total_scores) / len(total_scores) if total_scores else 0.0
+
+
+def calls_what_partial_match(predictions: List[str], references: List[str]) -> float:
+    """
+    Calculate partial match accuracy for CallsWhat task.
+    Score = (number of correctly predicted calls) / (total ground truth calls)
+    Partial match: only checks if ground truth call names appear in predicted call names
+
+    Args:
+        predictions: List of model predictions
+        references: List of reference JSON strings
+
+    Returns:
+        Average ratio of correctly predicted calls (0.0 to 1.0)
+    """
+    total_scores = []
+
+    for pred, ref in zip(predictions, references):
+        try:
+            pred_json = _parse_model_output(pred)
+            ref_json = json.loads(ref)
+
+            pred_calls = pred_json.get("calls", [])
+            ref_calls = ref_json.get("calls", [])
+
+            if not ref_calls:
+                # If no ground truth calls, score is 1.0 if prediction is also empty
+                score = 1.0 if not pred_calls else 0.0
+            else:
+                # Count how many ground truth calls have their names mentioned in predictions
+                correct_count = 0
+                for ref_call in ref_calls:
+                    ref_method = ref_call.get("method", "")
+                    if ref_method:
+                        # Check if the reference method name appears in any predicted call
+                        for pred_call in pred_calls:
+                            pred_method = pred_call.get("method", "")
+                            if ref_method in pred_method:
+                                correct_count += 1
+                                break
+
+                score = correct_count / len(ref_calls)
+
+            total_scores.append(score)
+
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            # Prediction couldn't be parsed as JSON or has wrong structure
+            total_scores.append(0.0)
+
+    return sum(total_scores) / len(total_scores) if total_scores else 0.0
+
+
+def called_by_exact_match(predictions: List[str], references: List[str]) -> float:
+    """
+    Calculate exact match accuracy for CalledBy task.
+    Score = (number of correctly predicted callers) / (total ground truth callers)
+
+    Args:
+        predictions: List of model predictions
+        references: List of reference JSON strings
+
+    Returns:
+        Average ratio of correctly predicted callers (0.0 to 1.0)
+    """
+    total_scores = []
+
+    for pred, ref in zip(predictions, references):
+        try:
+            pred_json = _parse_model_output(pred)
+            ref_json = json.loads(ref)
+
+            pred_callers = pred_json.get("callers", [])
+            ref_callers = ref_json.get("callers", [])
+
+            if not ref_callers:
+                # If no ground truth callers, score is 1.0 if prediction is also empty
+                score = 1.0 if not pred_callers else 0.0
+            else:
+                # Count how many ground truth callers are correctly predicted (exact match)
+                correct_count = 0
+                for ref_caller in ref_callers:
+                    for pred_caller in pred_callers:
+                        if (pred_caller.get("filename") == ref_caller.get("filename") and
+                            pred_caller.get("class") == ref_caller.get("class") and
+                            pred_caller.get("method") == ref_caller.get("method")):
+                            correct_count += 1
+                            break
+
+                score = correct_count / len(ref_callers)
+
+            total_scores.append(score)
+
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            # Prediction couldn't be parsed as JSON or has wrong structure
+            total_scores.append(0.0)
+
+    return sum(total_scores) / len(total_scores) if total_scores else 0.0
+
+
+def called_by_partial_match(predictions: List[str], references: List[str]) -> float:
+    """
+    Calculate partial match accuracy for CalledBy task.
+    Score = (number of correctly predicted callers) / (total ground truth callers)
+    Partial match: only checks if ground truth caller names appear in predicted caller names
+
+    Args:
+        predictions: List of model predictions
+        references: List of reference JSON strings
+
+    Returns:
+        Average ratio of correctly predicted callers (0.0 to 1.0)
+    """
+    total_scores = []
+
+    for pred, ref in zip(predictions, references):
+        try:
+            pred_json = _parse_model_output(pred)
+            ref_json = json.loads(ref)
+
+            pred_callers = pred_json.get("callers", [])
+            ref_callers = ref_json.get("callers", [])
+
+            if not ref_callers:
+                # If no ground truth callers, score is 1.0 if prediction is also empty
+                score = 1.0 if not pred_callers else 0.0
+            else:
+                # Count how many ground truth callers have their names mentioned in predictions
+                correct_count = 0
+                for ref_caller in ref_callers:
+                    ref_method = ref_caller.get("method", "")
+                    if ref_method:
+                        # Check if the reference caller method name appears in any predicted caller
+                        for pred_caller in pred_callers:
+                            pred_method = pred_caller.get("method", "")
+                            if ref_method in pred_method:
+                                correct_count += 1
+                                break
+
+                score = correct_count / len(ref_callers)
+
+            total_scores.append(score)
+
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            # Prediction couldn't be parsed as JSON or has wrong structure
+            total_scores.append(0.0)
+
+    return sum(total_scores) / len(total_scores) if total_scores else 0.0
+
+
 # Register metrics exactly once to prevent duplicate-registration assertions when
 # YAML task configs import this module multiple times via spec_from_file_location
 if "defined_in_exact_match" not in registry.METRIC_REGISTRY:
@@ -286,3 +534,15 @@ if "belongs_to_exact_match" not in registry.METRIC_REGISTRY:
 
 if "belongs_to_partial_match" not in registry.METRIC_REGISTRY:
     register_metric(metric="belongs_to_partial_match", higher_is_better=True)(belongs_to_partial_match)
+
+if "calls_what_exact_match" not in registry.METRIC_REGISTRY:
+    register_metric(metric="calls_what_exact_match", higher_is_better=True)(calls_what_exact_match)
+
+if "calls_what_partial_match" not in registry.METRIC_REGISTRY:
+    register_metric(metric="calls_what_partial_match", higher_is_better=True)(calls_what_partial_match)
+
+if "called_by_exact_match" not in registry.METRIC_REGISTRY:
+    register_metric(metric="called_by_exact_match", higher_is_better=True)(called_by_exact_match)
+
+if "called_by_partial_match" not in registry.METRIC_REGISTRY:
+    register_metric(metric="called_by_partial_match", higher_is_better=True)(called_by_partial_match)
