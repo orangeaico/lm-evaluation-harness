@@ -6,7 +6,7 @@ dataset_path: json
 dataset_name: null
 dataset_kwargs:
   data_files:
-    test: "/home/surya/livup/repo_eval/data/tasks/*/*/DefinedIn.jsonl"
+    test: "/home/surya/livup/repo_eval/data/tasks/xarray/3aa75c8*/DefinedIn.jsonl"
 output_type: generate_until
 test_split: test
 process_docs: !function utils.process_defined_in_docs
