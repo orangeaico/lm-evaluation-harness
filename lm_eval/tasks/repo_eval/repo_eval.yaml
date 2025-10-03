@@ -1,9 +1,9 @@
 group: repo_eval
 task:
   - repo_eval_defined_in
-  - repo_eval_belongs_to
-  - repo_eval_calls_what
-  - repo_eval_called_by
+  # - repo_eval_belongs_to
+  # - repo_eval_calls_what
+  # - repo_eval_called_by
 aggregate_metric_list:
   - metric: defined_in_exact_match
     aggregation: mean
