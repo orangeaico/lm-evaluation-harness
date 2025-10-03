@@ -378,7 +378,7 @@ def calls_what_partial_match(predictions: List[str], references: List[str]) -> f
     """
     Calculate partial match accuracy for CallsWhat task.
     Score = (number of correctly predicted calls) / (total ground truth calls)
-    Partial match: only checks if ground truth call names appear in predicted call names
+    Partial match: only checks if ground truth method names exactly match predicted method names (ignoring filename/class)
 
     Args:
         predictions: List of model predictions
@@ -401,15 +401,15 @@ def calls_what_partial_match(predictions: List[str], references: List[str]) -> f
                 # If no ground truth calls, score is 1.0 if prediction is also empty
                 score = 1.0 if not pred_calls else 0.0
             else:
-                # Count how many ground truth calls have their names mentioned in predictions
+                # Count how many ground truth calls have their method names exactly matched (ignoring filename/class)
                 correct_count = 0
                 for ref_call in ref_calls:
-                    ref_method = ref_call.get("method", "")
+                    ref_method = ref_call.get("method", "").strip()
                     if ref_method:
-                        # Check if the reference method name appears in any predicted call
+                        # Check if the reference method name exactly matches any predicted call method
                         for pred_call in pred_calls:
-                            pred_method = pred_call.get("method", "")
-                            if ref_method in pred_method:
+                            pred_method = pred_call.get("method", "").strip()
+                            if ref_method == pred_method:
                                 correct_count += 1
                                 break
 
@@ -475,7 +475,7 @@ def called_by_partial_match(predictions: List[str], references: List[str]) -> fl
     """
     Calculate partial match accuracy for CalledBy task.
     Score = (number of correctly predicted callers) / (total ground truth callers)
-    Partial match: only checks if ground truth caller names appear in predicted caller names
+    Partial match: only checks if ground truth method names exactly match predicted method names (ignoring filename/class)
 
     Args:
         predictions: List of model predictions
@@ -498,15 +498,15 @@ def called_by_partial_match(predictions: List[str], references: List[str]) -> fl
                 # If no ground truth callers, score is 1.0 if prediction is also empty
                 score = 1.0 if not pred_callers else 0.0
             else:
-                # Count how many ground truth callers have their names mentioned in predictions
+                # Count how many ground truth callers have their method names exactly matched (ignoring filename/class)
                 correct_count = 0
                 for ref_caller in ref_callers:
-                    ref_method = ref_caller.get("method", "")
+                    ref_method = ref_caller.get("method", "").strip()
                     if ref_method:
-                        # Check if the reference caller method name appears in any predicted caller
+                        # Check if the reference caller method name exactly matches any predicted caller method
                         for pred_caller in pred_callers:
-                            pred_method = pred_caller.get("method", "")
-                            if ref_method in pred_method:
+                            pred_method = pred_caller.get("method", "").strip()
+                            if ref_method == pred_method:
                                 correct_count += 1
                                 break
 
