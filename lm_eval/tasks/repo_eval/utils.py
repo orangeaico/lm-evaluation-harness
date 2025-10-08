@@ -2,15 +2,37 @@
 Utilities for repo-eval tasks in lm-evaluation-harness.
 
 This module provides data processing and metric calculation functions
-for the DefinedIn and BelongsTo code understanding tasks.
+for the DefinedIn, BelongsTo, CallsWhat, and CalledBy code understanding tasks.
+Enhanced with fenced JSON parsing and Pydantic validation.
 """
 
 import json
-import re
+import sys
+from pathlib import Path
 from typing import Dict, Any, List
 import datasets
 from lm_eval.api import registry
 from lm_eval.api.registry import register_metric
+
+# Ensure project src directory is on the path for parser imports
+SRC_ROOT = Path(__file__).resolve().parents[5]
+if str(SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(SRC_ROOT))
+
+from eval.parsers.fenced_json_parser import (
+    parse_defined_in,
+    parse_belongs_to,
+    parse_calls_what,
+    parse_called_by
+)
+
+
+TASK_PARSERS = {
+    'DefinedIn': parse_defined_in,
+    'BelongsTo': parse_belongs_to,
+    'CallsWhat': parse_calls_what,
+    'CalledBy': parse_called_by,
+}
 
 
 def process_defined_in_docs(dataset: datasets.Dataset) -> datasets.Dataset:
@@ -121,87 +143,101 @@ def process_called_by_docs(dataset: datasets.Dataset) -> datasets.Dataset:
     return dataset.map(_process_doc)
 
 
-class ExtractJSONFilter:
-    """Filter class to extract JSON from model responses."""
+class FencedJSONFilter:
+    """
+    Filter class to extract and validate fenced JSON from model responses.
+
+    This replaces the old ExtractJSONFilter with proper fenced JSON parsing
+    and Pydantic validation for each task type.
+    """
+
+    def __init__(self, task_name: str):
+        """
+        Initialize filter for a specific task type.
+
+        Args:
+            task_name: One of 'DefinedIn', 'BelongsTo', 'CallsWhat', 'CalledBy'
+        """
+        self.task_name = task_name
 
     def apply(self, resps: List[str], docs: List[Dict[str, Any]]) -> List[str]:
         """
-        Apply JSON extraction to model responses.
+        Apply fenced JSON extraction and validation to model responses.
 
         Args:
-            resps: List of model responses
+            resps: List of model responses (may be nested lists)
             docs: List of documents (unused)
 
         Returns:
-            List of processed responses with extracted JSON
+            List of validated JSON strings ready for metric calculation
         """
+        parser = TASK_PARSERS.get(self.task_name)
+        if not parser:
+            raise ValueError(f"Unknown task name: {self.task_name}")
+
         processed = []
         for resp in resps:
-            # Handle both string and list responses
+            # Handle nested list responses from LM-eval
             if isinstance(resp, list):
-                # Take the first response if it's a list
                 resp_str = str(resp[0]) if resp else ""
             else:
                 resp_str = str(resp)
-            processed.append(self.extract_json_response(resp_str))
+
+            # Parse and validate using task-specific parser
+            parsed_dict = parser(resp_str)
+
+            # Convert back to JSON string for LM-eval compatibility
+            processed.append(json.dumps(parsed_dict))
+
         return processed
 
-    def extract_json_response(self, response: str) -> str:
-        """
-        Extract JSON from model response.
 
-        Args:
-            response: Raw model response
-
-        Returns:
-            Extracted JSON string or original response if no JSON found
-        """
-        # Try to find JSON in the response
-        json_patterns = [
-            r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}',  # Simple nested JSON
-            r'\{.*?\}',  # Basic JSON pattern
-        ]
-
-        for pattern in json_patterns:
-            matches = re.findall(pattern, response, re.DOTALL)
-            for match in matches:
-                try:
-                    # Validate it's proper JSON
-                    json.loads(match)
-                    return match.strip()
-                except json.JSONDecodeError:
-                    continue
-
-        # If no valid JSON found, return the response as-is
-        return response.strip()
+# Task-specific filter factory functions
+def defined_in_json_filter():
+    """Factory function for DefinedIn JSON extraction filter."""
+    return FencedJSONFilter('DefinedIn')
 
 
+def belongs_to_json_filter():
+    """Factory function for BelongsTo JSON extraction filter."""
+    return FencedJSONFilter('BelongsTo')
+
+
+def calls_what_json_filter():
+    """Factory function for CallsWhat JSON extraction filter."""
+    return FencedJSONFilter('CallsWhat')
+
+
+def called_by_json_filter():
+    """Factory function for CalledBy JSON extraction filter."""
+    return FencedJSONFilter('CalledBy')
+
+
+# Legacy function for backward compatibility
 def extract_json_response():
-    """Factory function for JSON extraction filter."""
-    return ExtractJSONFilter()
+    """Legacy factory function - use task-specific filters instead."""
+    return FencedJSONFilter('DefinedIn')  # Default fallback
 
 
-def _parse_model_output(response: str) -> Dict[str, Any]:
+def _parse_model_output(response: str, task_name: str) -> Dict[str, Any]:
     """
-    Parse model output and extract JSON.
+    Parse model output and extract JSON for a specific task.
 
     Args:
         response: Model response string
+        task_name: Name of the task to determine the expected schema
 
     Returns:
         Parsed JSON dict or empty dict if parsing fails
     """
+    parser = TASK_PARSERS.get(task_name)
+    if not parser:
+        raise ValueError(f"Unknown task name: {task_name}")
+
     try:
-        # First try to parse the response directly
-        return json.loads(response)
-    except json.JSONDecodeError:
-        # Try to extract JSON from the response using the filter class
-        filter_instance = ExtractJSONFilter()
-        extracted = filter_instance.extract_json_response(response)
-        try:
-            return json.loads(extracted)
-        except json.JSONDecodeError:
-            return {}
+        return parser(response)
+    except Exception:
+        return {}
 
 
 def defined_in_exact_match(predictions: List[str], references: List[str]) -> float:
@@ -220,7 +256,7 @@ def defined_in_exact_match(predictions: List[str], references: List[str]) -> flo
 
     for pred, ref in zip(predictions, references):
         try:
-            pred_json = _parse_model_output(pred)
+            pred_json = _parse_model_output(pred, 'DefinedIn')
             ref_json = json.loads(ref)
 
             # Check if all required fields match exactly (filename and class)
@@ -251,7 +287,7 @@ def defined_in_partial_match(predictions: List[str], references: List[str]) -> f
 
     for pred, ref in zip(predictions, references):
         try:
-            pred_json = _parse_model_output(pred)
+            pred_json = _parse_model_output(pred, 'DefinedIn')
             ref_json = json.loads(ref)
 
             # Check if filename matches (most important field)
@@ -281,7 +317,7 @@ def belongs_to_exact_match(predictions: List[str], references: List[str]) -> flo
 
     for pred, ref in zip(predictions, references):
         try:
-            pred_json = _parse_model_output(pred)
+            pred_json = _parse_model_output(pred, 'BelongsTo')
             ref_json = json.loads(ref)
 
             # Check if all fields match exactly (filename, class, method)
@@ -313,7 +349,7 @@ def belongs_to_partial_match(predictions: List[str], references: List[str]) -> f
 
     for pred, ref in zip(predictions, references):
         try:
-            pred_json = _parse_model_output(pred)
+            pred_json = _parse_model_output(pred, 'BelongsTo')
             ref_json = json.loads(ref)
 
             # Check if filename matches (most important field)
@@ -343,7 +379,7 @@ def calls_what_exact_match(predictions: List[str], references: List[str]) -> flo
 
     for pred, ref in zip(predictions, references):
         try:
-            pred_json = _parse_model_output(pred)
+            pred_json = _parse_model_output(pred, 'CallsWhat')
             ref_json = json.loads(ref)
 
             pred_calls = pred_json.get("calls", [])
@@ -391,7 +427,7 @@ def calls_what_partial_match(predictions: List[str], references: List[str]) -> f
 
     for pred, ref in zip(predictions, references):
         try:
-            pred_json = _parse_model_output(pred)
+            pred_json = _parse_model_output(pred, 'CallsWhat')
             ref_json = json.loads(ref)
 
             pred_calls = pred_json.get("calls", [])
@@ -440,7 +476,7 @@ def called_by_exact_match(predictions: List[str], references: List[str]) -> floa
 
     for pred, ref in zip(predictions, references):
         try:
-            pred_json = _parse_model_output(pred)
+            pred_json = _parse_model_output(pred, 'CalledBy')
             ref_json = json.loads(ref)
 
             pred_callers = pred_json.get("callers", [])
@@ -488,7 +524,7 @@ def called_by_partial_match(predictions: List[str], references: List[str]) -> fl
 
     for pred, ref in zip(predictions, references):
         try:
-            pred_json = _parse_model_output(pred)
+            pred_json = _parse_model_output(pred, 'CalledBy')
             ref_json = json.loads(ref)
 
             pred_callers = pred_json.get("callers", [])
