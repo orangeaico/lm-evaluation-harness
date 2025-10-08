@@ -23,7 +23,11 @@ from eval.parsers.fenced_json_parser import (
     parse_defined_in,
     parse_belongs_to,
     parse_calls_what,
-    parse_called_by
+    parse_called_by,
+    parse_loc_file,
+    parse_loc_func,
+    parse_loc_line,
+    extract_fenced_json,
 )
 
 
@@ -32,6 +36,9 @@ TASK_PARSERS = {
     'BelongsTo': parse_belongs_to,
     'CallsWhat': parse_calls_what,
     'CalledBy': parse_called_by,
+    'LocFile': parse_loc_file,
+    'LocFunc': parse_loc_func,
+    'LocLine': parse_loc_line,
 }
 
 
@@ -143,6 +150,60 @@ def process_called_by_docs(dataset: datasets.Dataset) -> datasets.Dataset:
     return dataset.map(_process_doc)
 
 
+def process_loc_file_docs(dataset: datasets.Dataset) -> datasets.Dataset:
+    """Process LocFile documents for lm-eval format."""
+
+    def _process_doc(doc):
+        expected_outputs_json = json.dumps(doc["expected_outputs"], sort_keys=True)
+        return {
+            "prompt": doc["prompt"],
+            "expected_outputs": doc["expected_outputs"],
+            "expected_outputs_json": expected_outputs_json,
+            "task_id": doc["task_id"],
+            "repo_name": doc["repo_name"],
+            "commit_hash": doc["commit_hash"],
+            "difficulty_level": doc.get("difficulty_level", "unknown"),
+        }
+
+    return dataset.map(_process_doc)
+
+
+def process_loc_func_docs(dataset: datasets.Dataset) -> datasets.Dataset:
+    """Process LocFunc documents for lm-eval format."""
+
+    def _process_doc(doc):
+        expected_outputs_json = json.dumps(doc["expected_outputs"], sort_keys=True)
+        return {
+            "prompt": doc["prompt"],
+            "expected_outputs": doc["expected_outputs"],
+            "expected_outputs_json": expected_outputs_json,
+            "task_id": doc["task_id"],
+            "repo_name": doc["repo_name"],
+            "commit_hash": doc["commit_hash"],
+            "difficulty_level": doc.get("difficulty_level", "unknown"),
+        }
+
+    return dataset.map(_process_doc)
+
+
+def process_loc_line_docs(dataset: datasets.Dataset) -> datasets.Dataset:
+    """Process LocLine documents for lm-eval format."""
+
+    def _process_doc(doc):
+        expected_outputs_json = json.dumps(doc["expected_outputs"], sort_keys=True)
+        return {
+            "prompt": doc["prompt"],
+            "expected_outputs": doc["expected_outputs"],
+            "expected_outputs_json": expected_outputs_json,
+            "task_id": doc["task_id"],
+            "repo_name": doc["repo_name"],
+            "commit_hash": doc["commit_hash"],
+            "difficulty_level": doc.get("difficulty_level", "unknown"),
+        }
+
+    return dataset.map(_process_doc)
+
+
 class FencedJSONFilter:
     """
     Filter class to extract and validate fenced JSON from model responses.
@@ -156,7 +217,8 @@ class FencedJSONFilter:
         Initialize filter for a specific task type.
 
         Args:
-            task_name: One of 'DefinedIn', 'BelongsTo', 'CallsWhat', 'CalledBy'
+            task_name: One of the registered repo-eval task names (DefinedIn, BelongsTo,
+                       CallsWhat, CalledBy, LocFile, LocFunc, LocLine)
         """
         self.task_name = task_name
 
@@ -211,6 +273,21 @@ def calls_what_json_filter():
 def called_by_json_filter():
     """Factory function for CalledBy JSON extraction filter."""
     return FencedJSONFilter('CalledBy')
+
+
+def loc_file_json_filter():
+    """Factory function for LocFile JSON extraction filter."""
+    return FencedJSONFilter('LocFile')
+
+
+def loc_func_json_filter():
+    """Factory function for LocFunc JSON extraction filter."""
+    return FencedJSONFilter('LocFunc')
+
+
+def loc_line_json_filter():
+    """Factory function for LocLine JSON extraction filter."""
+    return FencedJSONFilter('LocLine')
 
 
 # Legacy function for backward compatibility
@@ -582,3 +659,141 @@ if "called_by_exact_match" not in registry.METRIC_REGISTRY:
 
 if "called_by_partial_match" not in registry.METRIC_REGISTRY:
     register_metric(metric="called_by_partial_match", higher_is_better=True)(called_by_partial_match)
+
+
+def loc_file_recall(predictions: List[str], references: List[str]) -> float:
+    """
+    Simple recall-style metric for LocFile.
+
+    For each example, count how many ground-truth file paths are present
+    in the predicted list of files. Score per example = matches / |GT|.
+
+    - Predictions are parsed from fenced JSON blocks:
+      {"localized_files": ["xarray/core/dataset.py", ...]}
+    - References are JSON strings with the same schema (expected_outputs_json).
+    """
+    scores = []
+
+    for pred, ref in zip(predictions, references):
+        try:
+            # LM-eval may pass nested lists; normalize to string
+            pred_str = str(pred[0]) if isinstance(pred, list) and pred else str(pred)
+
+            # Extract last fenced JSON block (case-insensitive) and read files
+            pred_json = extract_fenced_json(pred_str) or {}
+            pred_files = set(map(str, pred_json.get("localized_files", [])))
+
+            ref_json = json.loads(ref)
+            gt_files = list(map(str, ref_json.get("localized_files", [])))
+
+            if not gt_files:
+                # If no GT, give full credit only when prediction is also empty
+                score = 1.0 if not pred_files else 0.0
+            else:
+                matches = sum(1 for f in gt_files if f in pred_files)
+                score = matches / len(gt_files)
+
+            scores.append(score)
+        except Exception:
+            scores.append(0.0)
+
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+# Register new Loc* metric(s)
+if "loc_file_recall" not in registry.METRIC_REGISTRY:
+    register_metric(metric="loc_file_recall", higher_is_better=True)(loc_file_recall)
+
+
+def loc_func_recall(predictions: List[str], references: List[str]) -> float:
+    """
+    Simple recall metric for LocFunc.
+
+    For each ground-truth function entry (filename, symbol), award a point if an
+    identical (filename, symbol) pair appears in predictions. Score per example
+    = matches / |GT|. Ignores symbol_type for matching.
+    """
+    scores = []
+
+    for pred, ref in zip(predictions, references):
+        try:
+            pred_str = str(pred[0]) if isinstance(pred, list) and pred else str(pred)
+            pred_json = extract_fenced_json(pred_str) or {}
+            pred_funcs = pred_json.get("localized_functions", []) or []
+
+            # Deduplicate by (filename, symbol)
+            pred_pairs = {
+                (str(it.get("filename", "")), str(it.get("symbol", "")))
+                for it in pred_funcs if isinstance(it, dict)
+            }
+
+            ref_json = json.loads(ref)
+            ref_funcs = ref_json.get("localized_functions", []) or []
+            gt_pairs = [
+                (str(it.get("filename", "")), str(it.get("symbol", "")))
+                for it in ref_funcs if isinstance(it, dict)
+            ]
+
+            if not gt_pairs:
+                score = 1.0 if not pred_pairs else 0.0
+            else:
+                matches = sum(1 for p in gt_pairs if p in pred_pairs)
+                score = matches / len(gt_pairs)
+
+            scores.append(score)
+        except Exception:
+            scores.append(0.0)
+
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def loc_line_recall(predictions: List[str], references: List[str]) -> float:
+    """
+    Simple recall metric for LocLine.
+
+    For each ground-truth line range (filename, range_str), award a point if an
+    identical pair appears in predictions. Score per example = matches / |GT|.
+
+    Notes:
+    - range_str uses the string form from JSON (e.g., "42" or "10-15").
+    - 'localized_components' is ignored for scoring.
+    """
+    def flatten_spans(obj: dict):
+        pairs = []
+        for item in (obj.get("localized_spans", []) or []):
+            if not isinstance(item, dict):
+                continue
+            fname = str(item.get("filename", ""))
+            for r in (item.get("localized_line_ranges", []) or []):
+                pairs.append((fname, str(r)))
+        return pairs
+
+    scores = []
+
+    for pred, ref in zip(predictions, references):
+        try:
+            pred_str = str(pred[0]) if isinstance(pred, list) and pred else str(pred)
+            pred_json = extract_fenced_json(pred_str) or {}
+            pred_pairs = set(flatten_spans(pred_json))
+
+            ref_json = json.loads(ref)
+            gt_pairs = flatten_spans(ref_json)
+
+            if not gt_pairs:
+                score = 1.0 if not pred_pairs else 0.0
+            else:
+                matches = sum(1 for p in gt_pairs if p in pred_pairs)
+                score = matches / len(gt_pairs)
+
+            scores.append(score)
+        except Exception:
+            scores.append(0.0)
+
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+if "loc_func_recall" not in registry.METRIC_REGISTRY:
+    register_metric(metric="loc_func_recall", higher_is_better=True)(loc_func_recall)
+
+if "loc_line_recall" not in registry.METRIC_REGISTRY:
+    register_metric(metric="loc_line_recall", higher_is_better=True)(loc_line_recall)

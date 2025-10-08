@@ -1,0 +1,29 @@
+tag:
+  - code_understanding
+  - repo_eval
+task: repo_eval_loc_file
+dataset_path: json
+dataset_name: null
+dataset_kwargs:
+  data_files:
+    test: "/home/surya/livup/repo_eval/data/tasks/xarray/loc_test/*/LocFile.jsonl"
+output_type: generate_until
+test_split: test
+process_docs: !function utils.process_loc_file_docs
+doc_to_text: "{{prompt}}"
+doc_to_target: "{{expected_outputs_json}}"
+metric_list:
+  - metric: loc_file_recall
+    aggregation: mean
+    higher_is_better: true
+generation_kwargs:
+  until:
+    - "<|im_end|>"
+  do_sample: false
+  temperature: 0.0
+  max_gen_toks: 2000
+repeats: 1
+num_fewshot: 0
+metadata:
+  version: 1.0
+  description: "Localization task: identify files that need changes for a bug fix"

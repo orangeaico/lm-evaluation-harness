@@ -1,6 +1,9 @@
 group: repo_eval
 task:
-  - repo_eval_defined_in
+  # - repo_eval_defined_in
+  - repo_eval_loc_file
+  - repo_eval_loc_func
+  - repo_eval_loc_line
   # - repo_eval_belongs_to
   # - repo_eval_calls_what
   # - repo_eval_called_by
@@ -27,6 +30,15 @@ aggregate_metric_list:
     aggregation: mean
     weight_by_size: true
   - metric: called_by_partial_match
+    aggregation: mean
+    weight_by_size: true
+  - metric: loc_file_recall
+    aggregation: mean
+    weight_by_size: true
+  - metric: loc_func_recall
+    aggregation: mean
+    weight_by_size: true
+  - metric: loc_line_recall
     aggregation: mean
     weight_by_size: true
 metadata:
