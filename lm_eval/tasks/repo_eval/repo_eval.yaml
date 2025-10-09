@@ -35,10 +35,19 @@ aggregate_metric_list:
   - metric: loc_file_recall
     aggregation: mean
     weight_by_size: true
+  - metric: loc_file_precision
+    aggregation: mean
+    weight_by_size: true
   - metric: loc_func_recall
     aggregation: mean
     weight_by_size: true
+  - metric: loc_func_precision
+    aggregation: mean
+    weight_by_size: true
   - metric: loc_line_recall
+    aggregation: mean
+    weight_by_size: true
+  - metric: loc_line_precision
     aggregation: mean
     weight_by_size: true
 metadata:
