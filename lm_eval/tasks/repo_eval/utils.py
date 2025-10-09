@@ -9,7 +9,7 @@ Enhanced with fenced JSON parsing and Pydantic validation.
 import json
 import sys
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Set
 import datasets
 from lm_eval.api import registry
 from lm_eval.api.registry import register_metric
@@ -779,26 +779,74 @@ def loc_func_recall(predictions: List[str], references: List[str]) -> float:
     return sum(scores) / len(scores) if scores else 0.0
 
 
+def _expand_range_to_lines(range_str: str) -> Set[int]:
+    """Expand a range string like '5-7' or '42' into a set of integers."""
+    if range_str is None:
+        return set()
+    cleaned = str(range_str).strip()
+    if not cleaned:
+        return set()
+    cleaned = cleaned.replace(" ", "")
+    if "-" in cleaned:
+        parts = cleaned.split("-")
+        if len(parts) != 2:
+            return set()
+        try:
+            start = int(parts[0])
+            end = int(parts[1])
+        except ValueError:
+            return set()
+        if start > end:
+            start, end = end, start
+        return set(range(start, end + 1))
+    try:
+        value = int(cleaned)
+    except ValueError:
+        return set()
+    return {value}
+
+
+def _lines_by_file(obj: dict) -> Dict[str, Set[int]]:
+    """Collect expanded line numbers per filename from a LocLine JSON payload."""
+    result: Dict[str, Set[int]] = {}
+    for item in (obj.get("localized_spans", []) or []):
+        if not isinstance(item, dict):
+            continue
+        filename = str(item.get("filename", "")).strip()
+        if not filename:
+            continue
+        ranges = item.get("localized_line_ranges", []) or []
+        for rng in ranges:
+            for line in _expand_range_to_lines(rng):
+                result.setdefault(filename, set()).add(line)
+    return result
+
+
 def loc_line_recall(predictions: List[str], references: List[str]) -> float:
     """
-    Simple recall metric for LocLine.
+    Recall metric for LocLine using expanded line numbers.
 
-    For each ground-truth line range (filename, range_str), award a point if an
-    identical pair appears in predictions. Score per example = matches / |GT|.
+    Each range string (e.g., "10-12", "45") is expanded into individual line
+    numbers per file, and recall is computed as matches / |GT lines|.
 
     Notes:
-    - range_str uses the string form from JSON (e.g., "42" or "10-15").
+    - Ranges are inclusive (e.g., "2-4" -> {2,3,4}).
+    - Invalid or empty ranges are ignored.
     - 'localized_components' is ignored for scoring.
     """
-    def flatten_spans(obj: dict):
-        pairs = []
+    def expand_lines_by_file(obj: dict):
+        result = {}
         for item in (obj.get("localized_spans", []) or []):
             if not isinstance(item, dict):
                 continue
-            fname = str(item.get("filename", ""))
-            for r in (item.get("localized_line_ranges", []) or []):
-                pairs.append((fname, str(r)))
-        return pairs
+            filename = str(item.get("filename", "")).strip()
+            if not filename:
+                continue
+            ranges = item.get("localized_line_ranges", []) or []
+            for rng in ranges:
+                for line in _expand_range_to_lines(str(rng)):
+                    result.setdefault(filename, set()).add(line)
+        return result
 
     scores = []
 
@@ -806,16 +854,21 @@ def loc_line_recall(predictions: List[str], references: List[str]) -> float:
         try:
             pred_str = str(pred[0]) if isinstance(pred, list) and pred else str(pred)
             pred_json = extract_fenced_json(pred_str) or {}
-            pred_pairs = set(flatten_spans(pred_json))
+            pred_lines = expand_lines_by_file(pred_json)
 
             ref_json = json.loads(ref)
-            gt_pairs = flatten_spans(ref_json)
+            gt_lines = expand_lines_by_file(ref_json)
 
-            if not gt_pairs:
-                score = 1.0 if not pred_pairs else 0.0
+            total_gt = sum(len(lines) for lines in gt_lines.values())
+            total_pred = sum(len(lines) for lines in pred_lines.values())
+
+            if total_gt == 0:
+                score = 1.0 if total_pred == 0 else 0.0
             else:
-                matches = sum(1 for p in gt_pairs if p in pred_pairs)
-                score = matches / len(gt_pairs)
+                matches = 0
+                for filename, gt_set in gt_lines.items():
+                    matches += len(gt_set & pred_lines.get(filename, set()))
+                score = matches / total_gt if total_gt else 0.0
 
             scores.append(score)
         except Exception:
@@ -870,17 +923,21 @@ def loc_func_precision(predictions: List[str], references: List[str]) -> float:
 
 def loc_line_precision(predictions: List[str], references: List[str]) -> float:
     """
-    Precision metric for LocLine based on (filename, range) pairs.
+    Precision metric for LocLine using expanded line numbers per file.
     """
-    def flatten_spans(obj: dict):
-        pairs = []
+    def expand_lines_by_file(obj: dict):
+        result = {}
         for item in (obj.get("localized_spans", []) or []):
             if not isinstance(item, dict):
                 continue
-            fname = str(item.get("filename", ""))
-            for r in (item.get("localized_line_ranges", []) or []):
-                pairs.append((fname, str(r)))
-        return pairs
+            filename = str(item.get("filename", "")).strip()
+            if not filename:
+                continue
+            ranges = item.get("localized_line_ranges", []) or []
+            for rng in ranges:
+                for line in _expand_range_to_lines(str(rng)):
+                    result.setdefault(filename, set()).add(line)
+        return result
 
     scores = []
 
@@ -888,17 +945,21 @@ def loc_line_precision(predictions: List[str], references: List[str]) -> float:
         try:
             pred_str = str(pred[0]) if isinstance(pred, list) and pred else str(pred)
             pred_json = extract_fenced_json(pred_str) or {}
-            pred_pairs = set(flatten_spans(pred_json))
+            pred_lines = expand_lines_by_file(pred_json)
 
             ref_json = json.loads(ref)
-            gt_pairs = set(flatten_spans(ref_json))
+            gt_lines = expand_lines_by_file(ref_json)
 
-            if not pred_pairs:
+            total_pred = sum(len(lines) for lines in pred_lines.values())
+            if total_pred == 0:
                 scores.append(0.0)
                 continue
 
-            matches = sum(1 for p in pred_pairs if p in gt_pairs)
-            score = matches / len(pred_pairs) if pred_pairs else 0.0
+            matches = 0
+            for filename, pred_set in pred_lines.items():
+                matches += len(pred_set & gt_lines.get(filename, set()))
+
+            score = matches / total_pred if total_pred else 0.0
             scores.append(score)
         except Exception:
             scores.append(0.0)

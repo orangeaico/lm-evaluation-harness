@@ -1,6 +1,6 @@
 group: repo_eval
 task:
-  # - repo_eval_defined_in
+  - repo_eval_defined_in
   - repo_eval_loc_file
   - repo_eval_loc_func
   - repo_eval_loc_line
