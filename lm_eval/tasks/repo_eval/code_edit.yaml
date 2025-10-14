@@ -1,0 +1,35 @@
+tag:
+  - code_understanding
+  - repo_eval
+task: repo_eval_code_edit
+dataset_path: json
+dataset_name: null
+dataset_kwargs:
+  data_files:
+    test: "/home/surya/livup/repo_eval/data/tasks/xarray/loc_test/*/CodeEdit.jsonl"
+output_type: generate_until
+test_split: test
+process_docs: !function utils.process_code_edit_docs
+doc_to_text: "{{prompt}}"
+doc_to_target: "{{expected_outputs_json}}"
+metric_list:
+  - metric: code_edit_patchsim
+    aggregation: code_edit_patchsim_micro
+    higher_is_better: true
+  - metric: code_edit_keyf1
+    aggregation: code_edit_keyf1_micro
+    higher_is_better: true
+  - metric: code_edit_replacesim
+    aggregation: code_edit_replacesim_micro
+    higher_is_better: true
+generation_kwargs:
+  until:
+    - "<|im_end|>"
+  do_sample: false
+  temperature: 0.0
+  max_gen_toks: 2000
+repeats: 1
+num_fewshot: 0
+metadata:
+  version: 1.0
+  description: "Search/replace code edit task"
