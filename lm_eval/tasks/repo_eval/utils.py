@@ -8,11 +8,12 @@ Enhanced with fenced JSON parsing and Pydantic validation.
 
 import json
 import sys
+from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Dict, Any, List, Set
+from typing import Dict, Any, List, Set, Tuple
 import datasets
 from lm_eval.api import registry
-from lm_eval.api.registry import register_metric
+from lm_eval.api.registry import register_metric, register_aggregation
 
 # Ensure project src directory is on the path for parser imports
 SRC_ROOT = Path(__file__).resolve().parents[5]
@@ -27,6 +28,7 @@ from eval.parsers.fenced_json_parser import (
     parse_loc_file,
     parse_loc_func,
     parse_loc_line,
+    parse_code_edit,
     extract_fenced_json,
 )
 
@@ -39,6 +41,7 @@ TASK_PARSERS = {
     'LocFile': parse_loc_file,
     'LocFunc': parse_loc_func,
     'LocLine': parse_loc_line,
+    'CodeEdit': parse_code_edit,
 }
 
 
@@ -188,6 +191,24 @@ def process_loc_func_docs(dataset: datasets.Dataset) -> datasets.Dataset:
 
 def process_loc_line_docs(dataset: datasets.Dataset) -> datasets.Dataset:
     """Process LocLine documents for lm-eval format."""
+
+    def _process_doc(doc):
+        expected_outputs_json = json.dumps(doc["expected_outputs"], sort_keys=True)
+        return {
+            "prompt": doc["prompt"],
+            "expected_outputs": doc["expected_outputs"],
+            "expected_outputs_json": expected_outputs_json,
+            "task_id": doc["task_id"],
+            "repo_name": doc["repo_name"],
+            "commit_hash": doc["commit_hash"],
+            "difficulty_level": doc.get("difficulty_level", "unknown"),
+        }
+
+    return dataset.map(_process_doc)
+
+
+def process_code_edit_docs(dataset: datasets.Dataset) -> datasets.Dataset:
+    """Process CodeEdit documents for lm-eval format."""
 
     def _process_doc(doc):
         expected_outputs_json = json.dumps(doc["expected_outputs"], sort_keys=True)
@@ -975,3 +996,195 @@ if "loc_func_precision" not in registry.METRIC_REGISTRY:
 
 if "loc_line_precision" not in registry.METRIC_REGISTRY:
     register_metric(metric="loc_line_precision", higher_is_better=True)(loc_line_precision)
+
+
+# ---------------------------------------------------------------------------
+# CodeEdit metrics (PatchSim)
+# ---------------------------------------------------------------------------
+
+def _norm_replace(text: str) -> str:
+    """Normalize replacement text for similarity scoring."""
+    if text is None:
+        return ""
+
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = "\n".join(line.rstrip() for line in normalized.split("\n"))
+
+    out_lines: List[str] = []
+    blank = False
+    for line in normalized.split("\n"):
+        if line == "":
+            if not blank:
+                out_lines.append("")
+            blank = True
+        else:
+            out_lines.append(line)
+            blank = False
+
+    return "\n".join(out_lines)
+
+
+def _code_edit_similarity(a: str, b: str) -> float:
+    """Return difflib-based similarity between two strings."""
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _normalize_code_edits(edits: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+    """Filter and normalize code edit entries."""
+    normalized: List[Dict[str, str]] = []
+    for entry in edits or []:
+        if not isinstance(entry, dict):
+            continue
+        file_path = str(entry.get("file", "")).strip()
+        if not file_path:
+            continue
+        search = entry.get("search")
+        if search is None:
+            continue
+        search_str = str(search)
+        replace = entry.get("replace", "")
+        replace_str = str(replace) if replace is not None else ""
+        normalized.append(
+            {
+                "file": file_path,
+                "search": search_str,
+                "replace": replace_str,
+            }
+        )
+    return normalized
+
+
+def _code_edit_components(
+    gt_ops: List[Dict[str, str]],
+    pred_ops: List[Dict[str, str]],
+) -> Dict[str, float]:
+    """Compute per-example PatchSim components."""
+    gold_map = {(op["file"], op["search"]): op["replace"] for op in gt_ops}
+    pred_map = {(op["file"], op["search"]): op["replace"] for op in pred_ops}
+
+    gold_keys = set(gold_map)
+    pred_keys = set(pred_map)
+    matched_keys = gold_keys & pred_keys
+
+    gold_count = len(gold_keys)
+    pred_count = len(pred_keys)
+    match_count = len(matched_keys)
+
+    degenerate = int(gold_count == 0 and pred_count == 0)
+
+    if matched_keys:
+        sim_num = 0.0
+        sim_den = 0.0
+        for key in matched_keys:
+            gold_text = _norm_replace(gold_map[key])
+            pred_text = _norm_replace(pred_map[key])
+            weight = max(len(gold_text), 1)  # avoid zero division for empty strings
+            sim_num += weight * _code_edit_similarity(pred_text, gold_text)
+            sim_den += weight
+    else:
+        sim_num = 0.0
+        sim_den = 0.0
+
+    return {
+        "gold": float(gold_count),
+        "pred": float(pred_count),
+        "match": float(match_count),
+        "sim_num": sim_num,
+        "sim_den": sim_den,
+        "degenerate": float(degenerate),
+    }
+
+
+def _aggregate_code_edit(items: List[Dict[str, float]]) -> Dict[str, float]:
+    """Aggregate PatchSim components across dataset."""
+    total_gold = sum(item.get("gold", 0.0) for item in items)
+    total_pred = sum(item.get("pred", 0.0) for item in items)
+    total_match = sum(item.get("match", 0.0) for item in items)
+    total_sim_num = sum(item.get("sim_num", 0.0) for item in items)
+    total_sim_den = sum(item.get("sim_den", 0.0) for item in items)
+    degenerate = int(sum(item.get("degenerate", 0.0) for item in items))
+    item_count = len(items)
+
+    if item_count == 0:
+        return {"key_f1": 0.0, "replace_sim": 0.0, "patchsim": 0.0}
+
+    if total_pred == 0 and total_gold == 0 and degenerate == item_count:
+        # No edits anywhere; perfect score
+        return {"key_f1": 1.0, "replace_sim": 1.0, "patchsim": 1.0}
+
+    key_prec = total_match / total_pred if total_pred > 0 else 0.0
+    key_rec = total_match / total_gold if total_gold > 0 else 0.0
+    key_f1 = (2 * key_prec * key_rec) / (key_prec + key_rec) if (key_prec + key_rec) else 0.0
+
+    if total_sim_den > 0:
+        replace_sim = total_sim_num / total_sim_den
+    elif degenerate == item_count:
+        replace_sim = 1.0
+    else:
+        replace_sim = 0.0
+
+    patchsim = key_f1 * replace_sim
+    return {"key_f1": key_f1, "replace_sim": replace_sim, "patchsim": patchsim}
+
+
+def code_edit_metric_components(predictions: List[str], references: List[str]) -> List[Dict[str, float]]:
+    """Return per-example PatchSim components for aggregation."""
+    items: List[Dict[str, float]] = []
+
+    for pred, ref in zip(predictions, references):
+        try:
+            pred_str = str(pred[0]) if isinstance(pred, list) and pred else str(pred)
+            parsed_pred = _parse_model_output(pred_str, "CodeEdit")
+            pred_edits = _normalize_code_edits(parsed_pred.get("code_edits", []))
+
+            ref_json = json.loads(ref)
+            gt_edits = _normalize_code_edits(ref_json.get("code_edits", []))
+
+            components = _code_edit_components(gt_edits, pred_edits)
+        except Exception:
+            components = _code_edit_components([], [])
+
+        items.append(components)
+
+    return items
+
+
+@register_aggregation("code_edit_patchsim_micro")
+def code_edit_patchsim_micro(items: List[Dict[str, float]]) -> float:
+    return _aggregate_code_edit(items)["patchsim"]
+
+
+@register_aggregation("code_edit_keyf1_micro")
+def code_edit_keyf1_micro(items: List[Dict[str, float]]) -> float:
+    return _aggregate_code_edit(items)["key_f1"]
+
+
+@register_aggregation("code_edit_replacesim_micro")
+def code_edit_replacesim_micro(items: List[Dict[str, float]]) -> float:
+    return _aggregate_code_edit(items)["replace_sim"]
+
+
+def _register_code_edit_metrics():
+    if "code_edit_patchsim" not in registry.METRIC_REGISTRY:
+        register_metric(
+            metric="code_edit_patchsim",
+            higher_is_better=True,
+            aggregation="code_edit_patchsim_micro",
+        )(code_edit_metric_components)
+
+    if "code_edit_keyf1" not in registry.METRIC_REGISTRY:
+        register_metric(
+            metric="code_edit_keyf1",
+            higher_is_better=True,
+            aggregation="code_edit_keyf1_micro",
+        )(code_edit_metric_components)
+
+    if "code_edit_replacesim" not in registry.METRIC_REGISTRY:
+        register_metric(
+            metric="code_edit_replacesim",
+            higher_is_better=True,
+            aggregation="code_edit_replacesim_micro",
+        )(code_edit_metric_components)
+
+
+_register_code_edit_metrics()
