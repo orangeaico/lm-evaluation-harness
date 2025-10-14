@@ -1149,41 +1149,26 @@ def code_edit_metric_components(predictions: List[str], references: List[str]) -
     return items
 
 
-@register_aggregation("code_edit_patchsim_micro")
-def code_edit_patchsim_micro(items: List[Dict[str, float]]) -> float:
-    return _aggregate_code_edit(items)["patchsim"]
-
-
-@register_aggregation("code_edit_keyf1_micro")
-def code_edit_keyf1_micro(items: List[Dict[str, float]]) -> float:
-    return _aggregate_code_edit(items)["key_f1"]
-
-
-@register_aggregation("code_edit_replacesim_micro")
-def code_edit_replacesim_micro(items: List[Dict[str, float]]) -> float:
-    return _aggregate_code_edit(items)["replace_sim"]
-
-
 def _register_code_edit_metrics():
     if "code_edit_patchsim" not in registry.METRIC_REGISTRY:
         register_metric(
             metric="code_edit_patchsim",
             higher_is_better=True,
-            aggregation="code_edit_patchsim_micro",
+            aggregation="mean",
         )(code_edit_metric_components)
 
     if "code_edit_keyf1" not in registry.METRIC_REGISTRY:
         register_metric(
             metric="code_edit_keyf1",
             higher_is_better=True,
-            aggregation="code_edit_keyf1_micro",
+            aggregation="mean",
         )(code_edit_metric_components)
 
     if "code_edit_replacesim" not in registry.METRIC_REGISTRY:
         register_metric(
             metric="code_edit_replacesim",
             higher_is_better=True,
-            aggregation="code_edit_replacesim_micro",
+            aggregation="mean",
         )(code_edit_metric_components)
 
 
