@@ -6,7 +6,7 @@ dataset_path: json
 dataset_name: null
 dataset_kwargs:
   data_files:
-    test: "/home/surya/livup/repo_eval/data/tasks/xarray/loc_test/*/CodeEdit.jsonl"
+    test: "/home/surya/livup/repo_eval/data/tasks/xarray/*/CodeEdit.jsonl"
 output_type: generate_until
 test_split: test
 process_docs: !function utils.process_code_edit_docs
@@ -14,13 +14,13 @@ doc_to_text: "{{prompt}}"
 doc_to_target: "{{expected_outputs_json}}"
 metric_list:
   - metric: code_edit_patchsim
-    aggregation: mean
+    aggregation: code_edit_patchsim_macro
     higher_is_better: true
   - metric: code_edit_keyf1
-    aggregation: mean
+    aggregation: code_edit_keyf1_macro
     higher_is_better: true
   - metric: code_edit_replacesim
-    aggregation: mean
+    aggregation: code_edit_replacesim_macro
     higher_is_better: true
 generation_kwargs:
   until:

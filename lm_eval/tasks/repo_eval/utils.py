@@ -6,6 +6,7 @@ for the DefinedIn, BelongsTo, CallsWhat, and CalledBy code understanding tasks.
 Enhanced with fenced JSON parsing and Pydantic validation.
 """
 
+import copy
 import json
 import sys
 from difflib import SequenceMatcher
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Set, Tuple
 import datasets
 from lm_eval.api import registry
+from lm_eval.api.metrics import aggregate_subtask_metrics
 from lm_eval.api.registry import register_metric, register_aggregation
 
 # Ensure project src directory is on the path for parser imports
@@ -211,7 +213,9 @@ def process_code_edit_docs(dataset: datasets.Dataset) -> datasets.Dataset:
     """Process CodeEdit documents for lm-eval format."""
 
     def _process_doc(doc):
-        expected_outputs_json = json.dumps(doc["expected_outputs"], sort_keys=True)
+        expected_outputs = copy.deepcopy(doc["expected_outputs"])
+        expected_outputs["_prompt"] = doc["prompt"]
+        expected_outputs_json = json.dumps(expected_outputs, sort_keys=True)
         return {
             "prompt": doc["prompt"],
             "expected_outputs": doc["expected_outputs"],
@@ -1029,10 +1033,11 @@ def _code_edit_similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, a, b).ratio()
 
 
-def _normalize_code_edits(edits: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    """Filter and normalize code edit entries."""
-    normalized: List[Dict[str, str]] = []
-    for entry in edits or []:
+def _sanitize_code_edits(edits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filter, normalize, and deduplicate code edit entries per file."""
+    initial: List[Dict[str, Any]] = []
+
+    for idx, entry in enumerate(edits or []):
         if not isinstance(entry, dict):
             continue
         file_path = str(entry.get("file", "")).strip()
@@ -1042,46 +1047,175 @@ def _normalize_code_edits(edits: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         if search is None:
             continue
         search_str = str(search)
+        if not search_str:
+            continue
         replace = entry.get("replace", "")
         replace_str = str(replace) if replace is not None else ""
-        normalized.append(
+        initial.append(
             {
                 "file": file_path,
                 "search": search_str,
                 "replace": replace_str,
+                "_orig_index": idx,
             }
         )
-    return normalized
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for item in initial:
+        grouped.setdefault(item["file"], []).append(item)
+
+    sanitized: List[Dict[str, Any]] = []
+    for file_path, items in grouped.items():
+        filtered: List[Dict[str, Any]] = []
+        for candidate in sorted(items, key=lambda it: (-len(it["search"]), it["_orig_index"])):
+            if any(candidate["search"] in kept["search"] for kept in filtered):
+                continue
+            filtered.append(candidate)
+        sanitized.extend(sorted(filtered, key=lambda it: it["_orig_index"]))
+
+    sanitized.sort(key=lambda it: (it["file"], it["_orig_index"]))
+    return sanitized
+
+
+def _find_available_span(
+    prompt: str, snippet: str, used: List[Tuple[int, int]]
+) -> Tuple[int | None, int | None]:
+    """Locate a snippet within the prompt without reusing occupied spans."""
+    if not prompt or not snippet:
+        return None, None
+
+    start = prompt.find(snippet)
+    while start != -1:
+        end = start + len(snippet)
+        if not any(not (end <= u_start or start >= u_end) for u_start, u_end in used):
+            used.append((start, end))
+            return start, end
+        start = prompt.find(snippet, start + 1)
+
+    return None, None
+
+
+def _prepare_code_edit_entries(
+    edits: List[Dict[str, Any]], prompt: str
+) -> List[Dict[str, Any]]:
+    """Sanitize edits and enrich them with ordering metadata."""
+    sanitized = _sanitize_code_edits(edits)
+    prepared: List[Dict[str, Any]] = []
+    used_spans: List[Tuple[int, int]] = []
+    fallback_counter = 0
+
+    for item in sanitized:
+        start, end = _find_available_span(prompt, item["search"], used_spans)
+        order_key = start if start is not None else (10**12 + fallback_counter)
+        fallback_counter += 1
+
+        prepared.append(
+            {
+                "file": item["file"],
+                "search": item["search"],
+                "replace": item["replace"],
+                "start": start,
+                "end": end,
+                "_order_key": order_key,
+                "_orig_index": item["_orig_index"],
+            }
+        )
+
+    prepared.sort(key=lambda it: (it["_order_key"], it["_orig_index"]))
+    return prepared
+
+
+def _build_code_edit_patch(entries: List[Dict[str, Any]]) -> str:
+    """Create an ordered textual patch representation for similarity scoring."""
+    lines: List[str] = []
+    for entry in entries:
+        start = entry.get("start")
+        end = entry.get("end")
+        if start is None or end is None:
+            header = f"@@ {entry['file']} @@"
+        else:
+            header = f"@@ {entry['file']} {start}-{end} @@"
+        lines.append(header)
+        lines.append("-" + entry["search"])
+        lines.append("+" + entry["replace"])
+    return "\n".join(lines)
+
+
+def _span_overlap(a: Dict[str, Any], b: Dict[str, Any]) -> int:
+    """Return the number of overlapping characters between two spans."""
+    if a.get("start") is None or b.get("start") is None:
+        return 0
+    start = max(a["start"], b["start"])
+    end = min(a["end"], b["end"])
+    return max(0, end - start)
+
+
+def _match_code_edit_entries(
+    gold_entries: List[Dict[str, Any]],
+    pred_entries: List[Dict[str, Any]],
+) -> int:
+    """Pair predicted edits with gold edits using similarity and span overlap."""
+    matches = 0
+    used_pred: Set[int] = set()
+
+    for gold in gold_entries:
+        best_idx = None
+        best_score = 0.0
+
+        for idx, pred in enumerate(pred_entries):
+            if idx in used_pred:
+                continue
+            if pred["file"] != gold["file"]:
+                continue
+
+            similarity = _code_edit_similarity(pred["search"], gold["search"])
+            if not similarity and not _span_overlap(gold, pred):
+                continue
+
+            if gold["search"] in pred["search"] or pred["search"] in gold["search"]:
+                similarity = max(similarity, 0.7 if gold["search"] != pred["search"] else 1.0)
+
+            overlap_bonus = 1.0 if _span_overlap(gold, pred) > 0 else 0.0
+            score = similarity + overlap_bonus
+
+            if score > best_score and similarity >= 0.5:
+                best_score = score
+                best_idx = idx
+
+        if best_idx is not None:
+            used_pred.add(best_idx)
+            matches += 1
+
+    return matches
 
 
 def _code_edit_components(
-    gt_ops: List[Dict[str, str]],
-    pred_ops: List[Dict[str, str]],
+    gt_ops: List[Dict[str, Any]],
+    pred_ops: List[Dict[str, Any]],
+    prompt: str,
 ) -> Dict[str, float]:
-    """Compute per-example PatchSim components."""
-    gold_map = {(op["file"], op["search"]): op["replace"] for op in gt_ops}
-    pred_map = {(op["file"], op["search"]): op["replace"] for op in pred_ops}
+    """Compute per-example PatchSim components using ordered patch comparison."""
+    gold_entries = _prepare_code_edit_entries(gt_ops, prompt)
+    pred_entries = _prepare_code_edit_entries(pred_ops, prompt)
 
-    gold_keys = set(gold_map)
-    pred_keys = set(pred_map)
-    matched_keys = gold_keys & pred_keys
-
-    gold_count = len(gold_keys)
-    pred_count = len(pred_keys)
-    match_count = len(matched_keys)
-
+    gold_count = len(gold_entries)
+    pred_count = len(pred_entries)
+    match_count = _match_code_edit_entries(gold_entries, pred_entries)
     degenerate = int(gold_count == 0 and pred_count == 0)
 
-    if matched_keys:
+    gold_patch = _build_code_edit_patch(gold_entries)
+    pred_patch = _build_code_edit_patch(pred_entries)
+
+    if gold_patch or pred_patch:
+        weight = max(len(gold_patch), 1)
+        similarity = SequenceMatcher(None, pred_patch, gold_patch).ratio()
+        sim_num = similarity * weight
+        sim_den = weight
+    else:
         sim_num = 0.0
         sim_den = 0.0
-        for key in matched_keys:
-            gold_text = _norm_replace(gold_map[key])
-            pred_text = _norm_replace(pred_map[key])
-            weight = max(len(gold_text), 1)  # avoid zero division for empty strings
-            sim_num += weight * _code_edit_similarity(pred_text, gold_text)
-            sim_den += weight
-    else:
+
+    if degenerate:
         sim_num = 0.0
         sim_den = 0.0
 
@@ -1089,8 +1223,8 @@ def _code_edit_components(
         "gold": float(gold_count),
         "pred": float(pred_count),
         "match": float(match_count),
-        "sim_num": sim_num,
-        "sim_den": sim_den,
+        "sim_num": float(sim_num),
+        "sim_den": float(sim_den),
         "degenerate": float(degenerate),
     }
 
@@ -1126,49 +1260,165 @@ def _aggregate_code_edit(items: List[Dict[str, float]]) -> Dict[str, float]:
     patchsim = key_f1 * replace_sim
     return {"key_f1": key_f1, "replace_sim": replace_sim, "patchsim": patchsim}
 
+def _flatten_code_edit_items(items: List[Any]) -> List[Dict[str, float]]:
+    """Normalize raw metric outputs into a list of component dicts."""
+    flattened: List[Dict[str, float]] = []
+    for entry in items or []:
+        if isinstance(entry, dict):
+            flattened.append(entry)
+        elif isinstance(entry, (list, tuple)):
+            for sub_entry in entry:
+                if isinstance(sub_entry, dict):
+                    flattened.append(sub_entry)
+        elif hasattr(entry, "items"):
+            flattened.append(dict(entry))
+    return flattened
 
-def code_edit_metric_components(predictions: List[str], references: List[str]) -> List[Dict[str, float]]:
-    """Return per-example PatchSim components for aggregation."""
-    items: List[Dict[str, float]] = []
+
+def _aggregate_code_edit_value(items: List[Any], key: str) -> float:
+    """Aggregate a specific PatchSim component across dataset outputs."""
+    components = _flatten_code_edit_items(items)
+    aggregated = _aggregate_code_edit(components)
+    return float(aggregated.get(key, 0.0))
+
+
+def code_edit_patchsim_macro(items: List[Any]) -> float:
+    """Macro average PatchSim across a single dataset."""
+    return _aggregate_code_edit_value(items, "patchsim")
+
+
+def code_edit_keyf1_macro(items: List[Any]) -> float:
+    """Macro average key-level F1 across a single dataset."""
+    return _aggregate_code_edit_value(items, "key_f1")
+
+
+def code_edit_replacesim_macro(items: List[Any]) -> float:
+    """Macro average replace similarity across a single dataset."""
+    return _aggregate_code_edit_value(items, "replace_sim")
+
+
+def _extract_group_metric(
+    metrics: List[Any], sizes: List[int], key: str
+) -> tuple[List[float], List[int]]:
+    """Extract numeric values for group-level aggregation while filtering invalid entries."""
+    extracted: List[float] = []
+    filtered_sizes: List[int] = []
+
+    for value, size in zip(metrics, sizes):
+        if value is None or (isinstance(value, str) and value == "N/A"):
+            continue
+
+        if isinstance(value, dict):
+            numeric = value.get(key, 0.0)
+        elif isinstance(value, (list, tuple)) and value:
+            inner = value[0]
+            numeric = inner.get(key, 0.0) if isinstance(inner, dict) else inner
+        else:
+            numeric = value
+
+        try:
+            extracted.append(float(numeric))
+            filtered_sizes.append(size)
+        except (TypeError, ValueError):
+            continue
+
+    return extracted, filtered_sizes
+
+
+def code_edit_patchsim_micro(
+    metrics: List[Any], sizes: List[int], weight_by_size: bool = True
+) -> float:
+    """Aggregate PatchSim across subtasks using micro-averaging semantics."""
+    values, filtered_sizes = _extract_group_metric(metrics, sizes, "patchsim")
+    if not values or not filtered_sizes:
+        return 0.0
+    return aggregate_subtask_metrics(values, filtered_sizes, weight_by_size)
+
+
+def code_edit_keyf1_micro(
+    metrics: List[Any], sizes: List[int], weight_by_size: bool = True
+) -> float:
+    """Aggregate key-level F1 across subtasks using micro-averaging semantics."""
+    values, filtered_sizes = _extract_group_metric(metrics, sizes, "key_f1")
+    if not values or not filtered_sizes:
+        return 0.0
+    return aggregate_subtask_metrics(values, filtered_sizes, weight_by_size)
+
+
+def code_edit_replacesim_micro(
+    metrics: List[Any], sizes: List[int], weight_by_size: bool = True
+) -> float:
+    """Aggregate replace similarity across subtasks using micro-averaging semantics."""
+    values, filtered_sizes = _extract_group_metric(metrics, sizes, "replace_sim")
+    if not values or not filtered_sizes:
+        return 0.0
+    return aggregate_subtask_metrics(values, filtered_sizes, weight_by_size)
+
+
+def code_edit_metric_components(predictions: List[str], references: List[str]) -> Dict[str, List[Dict[str, float]]]:
+    """Return PatchSim components keyed by metric names for aggregation."""
+    components: List[Dict[str, float]] = []
 
     for pred, ref in zip(predictions, references):
+        prompt = ""
+        gt_edits: List[Dict[str, Any]] = []
+        pred_edits: List[Dict[str, Any]] = []
+
         try:
-            pred_str = str(pred[0]) if isinstance(pred, list) and pred else str(pred)
+            if isinstance(pred, list):
+                pred_str = str(pred[0]) if pred else ""
+            else:
+                pred_str = str(pred)
             parsed_pred = _parse_model_output(pred_str, "CodeEdit")
-            pred_edits = _normalize_code_edits(parsed_pred.get("code_edits", []))
-
-            ref_json = json.loads(ref)
-            gt_edits = _normalize_code_edits(ref_json.get("code_edits", []))
-
-            components = _code_edit_components(gt_edits, pred_edits)
+            pred_edits = parsed_pred.get("code_edits", [])
         except Exception:
-            components = _code_edit_components([], [])
+            pred_edits = []
 
-        items.append(components)
+        try:
+            ref_json = json.loads(ref)
+            prompt = ref_json.get("_prompt", "")
+            gt_edits = ref_json.get("code_edits", [])
+        except Exception:
+            gt_edits = []
 
-    return items
+        components.append(_code_edit_components(gt_edits, pred_edits, prompt))
+
+    return {
+        "code_edit_patchsim": components,
+        "code_edit_keyf1": components,
+        "code_edit_replacesim": components,
+    }
 
 
 def _register_code_edit_metrics():
+    if "code_edit_patchsim_macro" not in registry.AGGREGATION_REGISTRY:
+        register_aggregation("code_edit_patchsim_macro")(code_edit_patchsim_macro)
+
+    if "code_edit_keyf1_macro" not in registry.AGGREGATION_REGISTRY:
+        register_aggregation("code_edit_keyf1_macro")(code_edit_keyf1_macro)
+
+    if "code_edit_replacesim_macro" not in registry.AGGREGATION_REGISTRY:
+        register_aggregation("code_edit_replacesim_macro")(code_edit_replacesim_macro)
+
     if "code_edit_patchsim" not in registry.METRIC_REGISTRY:
         register_metric(
             metric="code_edit_patchsim",
             higher_is_better=True,
-            aggregation="mean",
+            aggregation="code_edit_patchsim_macro",
         )(code_edit_metric_components)
 
     if "code_edit_keyf1" not in registry.METRIC_REGISTRY:
         register_metric(
             metric="code_edit_keyf1",
             higher_is_better=True,
-            aggregation="mean",
+            aggregation="code_edit_keyf1_macro",
         )(code_edit_metric_components)
 
     if "code_edit_replacesim" not in registry.METRIC_REGISTRY:
         register_metric(
             metric="code_edit_replacesim",
             higher_is_better=True,
-            aggregation="mean",
+            aggregation="code_edit_replacesim_macro",
         )(code_edit_metric_components)
 
 
