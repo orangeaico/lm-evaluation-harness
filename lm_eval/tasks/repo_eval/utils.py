@@ -33,6 +33,7 @@ from eval.parsers.fenced_json_parser import (
     parse_code_edit,
     extract_fenced_json,
 )
+from eval.parsers.str_replace_parser import convert_str_replace_to_code_edits
 
 
 TASK_PARSERS = {
@@ -213,12 +214,24 @@ def process_code_edit_docs(dataset: datasets.Dataset) -> datasets.Dataset:
     """Process CodeEdit documents for lm-eval format."""
 
     def _process_doc(doc):
-        expected_outputs = copy.deepcopy(doc["expected_outputs"])
+        raw_expected = copy.deepcopy(doc["expected_outputs"])
+        if isinstance(raw_expected, str):
+            expected_outputs = {"code_edits": convert_str_replace_to_code_edits(raw_expected)}
+        elif isinstance(raw_expected, dict):
+            code_edits = raw_expected.get("code_edits")
+            if isinstance(code_edits, str):
+                raw_expected = dict(raw_expected)
+                raw_expected["code_edits"] = convert_str_replace_to_code_edits(code_edits)
+            expected_outputs = raw_expected
+        else:
+            expected_outputs = {"code_edits": []}
+
         expected_outputs["_prompt"] = doc["prompt"]
         expected_outputs_json = json.dumps(expected_outputs, sort_keys=True)
+        expected_outputs.pop("_prompt", None)
         return {
             "prompt": doc["prompt"],
-            "expected_outputs": doc["expected_outputs"],
+            "expected_outputs": expected_outputs,
             "expected_outputs_json": expected_outputs_json,
             "task_id": doc["task_id"],
             "repo_name": doc["repo_name"],
