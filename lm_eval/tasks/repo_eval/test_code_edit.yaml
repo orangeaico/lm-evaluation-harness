@@ -1,15 +1,15 @@
 tag:
   - code_understanding
   - repo_eval
-task: repo_eval_code_edit
+task: repo_eval_test_code_edit
 dataset_path: json
 dataset_name: null
 dataset_kwargs:
   data_files:
-    test: "/home/surya/livup/repo_eval/onehop_eval/CodeEdit.jsonl"
+    test: "/home/surya/livup/repo_eval/onehop_eval/TestCodeEdit.jsonl"
 output_type: generate_until
 test_split: test
-process_docs: !function utils.process_code_edit_docs
+process_docs: !function utils.process_test_code_edit_docs
 doc_to_text: "{{prompt}}"
 doc_to_target: "{{expected_outputs_json}}"
 metric_list:
@@ -32,4 +32,4 @@ repeats: 1
 num_fewshot: 0
 metadata:
   version: 1.0
-  description: "Search/replace code edit task"
+  description: "Test-focused search/replace code edit task"

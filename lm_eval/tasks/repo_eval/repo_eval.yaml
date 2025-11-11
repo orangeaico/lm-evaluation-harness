@@ -1,13 +1,15 @@
 group: repo_eval
 task:
-  - repo_eval_defined_in
+  # - repo_eval_defined_in
   - repo_eval_loc_file
   - repo_eval_loc_func
   - repo_eval_loc_line
-  - repo_eval_belongs_to
-  - repo_eval_calls_what
-  - repo_eval_called_by
+  # - repo_eval_belongs_to
+  # - repo_eval_calls_what
+  # - repo_eval_called_by
   - repo_eval_code_edit
+  - repo_eval_test_loc_file
+  - repo_eval_test_code_edit
 aggregate_metric_list:
   - metric: defined_in_exact_match
     aggregation: mean
@@ -52,13 +54,13 @@ aggregate_metric_list:
     aggregation: mean
     weight_by_size: true
   - metric: code_edit_patchsim
-    aggregation: code_edit_patchsim_micro
+    aggregation: mean
     weight_by_size: true
   - metric: code_edit_keyf1
-    aggregation: code_edit_keyf1_micro
+    aggregation: mean
     weight_by_size: true
   - metric: code_edit_replacesim
-    aggregation: code_edit_replacesim_micro
+    aggregation: mean
     weight_by_size: true
 metadata:
   version: 1.0

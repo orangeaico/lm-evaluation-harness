@@ -6,7 +6,7 @@ dataset_path: json
 dataset_name: null
 dataset_kwargs:
   data_files:
-    test: "/home/surya/livup/repo_eval/data/tasks/xarray/loc_test/*/LocLine.jsonl"
+    test: "/home/surya/livup/repo_eval/onehop_eval/LocLine.jsonl"
 output_type: generate_until
 test_split: test
 process_docs: !function utils.process_loc_line_docs

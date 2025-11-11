@@ -31,6 +31,8 @@ from eval.parsers.fenced_json_parser import (
     parse_loc_func,
     parse_loc_line,
     parse_code_edit,
+    parse_test_loc_file,
+    parse_test_code_edit,
     extract_fenced_json,
 )
 from eval.parsers.str_replace_parser import convert_str_replace_to_code_edits
@@ -45,6 +47,8 @@ TASK_PARSERS = {
     'LocFunc': parse_loc_func,
     'LocLine': parse_loc_line,
     'CodeEdit': parse_code_edit,
+    'TestLocFile': parse_test_loc_file,
+    'TestCodeEdit': parse_test_code_edit,
 }
 
 
@@ -210,6 +214,28 @@ def process_loc_line_docs(dataset: datasets.Dataset) -> datasets.Dataset:
     return dataset.map(_process_doc)
 
 
+def process_test_loc_file_docs(dataset: datasets.Dataset) -> datasets.Dataset:
+    """Process TestLocFile documents by normalizing to LocFile schema."""
+
+    def _process_doc(doc):
+        expected_outputs = copy.deepcopy(doc["expected_outputs"])
+        test_files = expected_outputs.get("test_files")
+        if isinstance(test_files, list):
+            expected_outputs["localized_files"] = test_files
+        expected_outputs_json = json.dumps(expected_outputs, sort_keys=True)
+        return {
+            "prompt": doc["prompt"],
+            "expected_outputs": expected_outputs,
+            "expected_outputs_json": expected_outputs_json,
+            "task_id": doc["task_id"],
+            "repo_name": doc["repo_name"],
+            "commit_hash": doc["commit_hash"],
+            "difficulty_level": doc.get("difficulty_level", "unknown"),
+        }
+
+    return dataset.map(_process_doc)
+
+
 def process_code_edit_docs(dataset: datasets.Dataset) -> datasets.Dataset:
     """Process CodeEdit documents for lm-eval format."""
 
@@ -225,6 +251,49 @@ def process_code_edit_docs(dataset: datasets.Dataset) -> datasets.Dataset:
             expected_outputs = raw_expected
         else:
             expected_outputs = {"code_edits": []}
+
+        expected_outputs["_prompt"] = doc["prompt"]
+        expected_outputs_json = json.dumps(expected_outputs, sort_keys=True)
+        expected_outputs.pop("_prompt", None)
+        return {
+            "prompt": doc["prompt"],
+            "expected_outputs": expected_outputs,
+            "expected_outputs_json": expected_outputs_json,
+            "task_id": doc["task_id"],
+            "repo_name": doc["repo_name"],
+            "commit_hash": doc["commit_hash"],
+            "difficulty_level": doc.get("difficulty_level", "unknown"),
+        }
+
+    return dataset.map(_process_doc)
+
+
+def process_test_code_edit_docs(dataset: datasets.Dataset) -> datasets.Dataset:
+    """Process TestCodeEdit documents for lm-eval format."""
+
+    def _process_doc(doc):
+        raw_expected = copy.deepcopy(doc["expected_outputs"])
+        expected_outputs: Dict[str, Any]
+        if isinstance(raw_expected, str):
+            edits = convert_str_replace_to_code_edits(raw_expected)
+            expected_outputs = {
+                "code_edits": edits,
+                "test_code_edits": edits,
+            }
+        elif isinstance(raw_expected, dict):
+            expected_outputs = dict(raw_expected)
+            test_code_edits = expected_outputs.get("test_code_edits")
+            code_edits = expected_outputs.get("code_edits")
+            if isinstance(test_code_edits, str):
+                edits = convert_str_replace_to_code_edits(test_code_edits)
+                expected_outputs["test_code_edits"] = edits
+                expected_outputs.setdefault("code_edits", edits)
+            elif isinstance(test_code_edits, list) and not code_edits:
+                expected_outputs["code_edits"] = test_code_edits
+            elif code_edits and not expected_outputs.get("test_code_edits"):
+                expected_outputs["test_code_edits"] = code_edits
+        else:
+            expected_outputs = {"code_edits": [], "test_code_edits": []}
 
         expected_outputs["_prompt"] = doc["prompt"]
         expected_outputs_json = json.dumps(expected_outputs, sort_keys=True)
@@ -719,10 +788,16 @@ def loc_file_recall(predictions: List[str], references: List[str]) -> float:
 
             # Extract last fenced JSON block (case-insensitive) and read files
             pred_json = extract_fenced_json(pred_str) or {}
-            pred_files = set(map(str, pred_json.get("localized_files", [])))
+            pred_files = pred_json.get("localized_files")
+            if not pred_files:
+                pred_files = pred_json.get("test_files", [])
+            pred_files = set(map(str, pred_files))
 
             ref_json = json.loads(ref)
-            gt_files = list(map(str, ref_json.get("localized_files", [])))
+            gt_files = ref_json.get("localized_files")
+            if not gt_files:
+                gt_files = ref_json.get("test_files", [])
+            gt_files = list(map(str, gt_files))
 
             if not gt_files:
                 # If no GT, give full credit only when prediction is also empty
@@ -757,10 +832,16 @@ def loc_file_precision(predictions: List[str], references: List[str]) -> float:
         try:
             pred_str = str(pred[0]) if isinstance(pred, list) and pred else str(pred)
             pred_json = extract_fenced_json(pred_str) or {}
-            pred_files = set(map(str, pred_json.get("localized_files", [])))
+            pred_files = pred_json.get("localized_files")
+            if not pred_files:
+                pred_files = pred_json.get("test_files", [])
+            pred_files = set(map(str, pred_files))
 
             ref_json = json.loads(ref)
-            gt_files = set(map(str, ref_json.get("localized_files", [])))
+            gt_files = ref_json.get("localized_files")
+            if not gt_files:
+                gt_files = ref_json.get("test_files", [])
+            gt_files = set(map(str, gt_files))
 
             if not pred_files:
                 scores.append(0.0)
@@ -1376,23 +1457,25 @@ def code_edit_metric_components(predictions: List[str], references: List[str]) -
         prompt = ""
         gt_edits: List[Dict[str, Any]] = []
         pred_edits: List[Dict[str, Any]] = []
+        task_key = "CodeEdit"
 
+        try:
+            ref_json = json.loads(ref)
+            prompt = ref_json.get("_prompt", "")
+            if ref_json.get("test_code_edits") is not None:
+                task_key = "TestCodeEdit"
+            gt_edits = ref_json.get("code_edits") or ref_json.get("test_code_edits", [])
+        except Exception:
+            gt_edits = []
         try:
             if isinstance(pred, list):
                 pred_str = str(pred[0]) if pred else ""
             else:
                 pred_str = str(pred)
-            parsed_pred = _parse_model_output(pred_str, "CodeEdit")
+            parsed_pred = _parse_model_output(pred_str, task_key)
             pred_edits = parsed_pred.get("code_edits", [])
         except Exception:
             pred_edits = []
-
-        try:
-            ref_json = json.loads(ref)
-            prompt = ref_json.get("_prompt", "")
-            gt_edits = ref_json.get("code_edits", [])
-        except Exception:
-            gt_edits = []
 
         components.append(_code_edit_components(gt_edits, pred_edits, prompt))
 
