@@ -9,6 +9,7 @@ Enhanced with fenced JSON parsing and Pydantic validation.
 import copy
 import json
 import sys
+import os
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Dict, Any, List, Set, Tuple
@@ -50,6 +51,21 @@ TASK_PARSERS = {
     'TestLocFile': parse_test_loc_file,
     'TestCodeEdit': parse_test_code_edit,
 }
+
+# ---------------------------------------------------------------------------
+# Config switches for localisation-style tasks
+# ---------------------------------------------------------------------------
+# When True, localisation metrics (LocFile/LocFunc/LocLine and test variants)
+# compare only filename basenames instead of full repo-relative paths.
+LOC_TASKS_FILENAME_ONLY: bool = True
+
+
+def _normalize_loc_filename(path: str) -> str:
+    """Normalize localisation filenames according to the global toggle."""
+    text = str(path).strip()
+    if not text:
+        return text
+    return os.path.basename(text) if LOC_TASKS_FILENAME_ONLY else text
 
 
 def process_defined_in_docs(dataset: datasets.Dataset) -> datasets.Dataset:
@@ -791,20 +807,30 @@ def loc_file_recall(predictions: List[str], references: List[str]) -> float:
             pred_files = pred_json.get("localized_files")
             if not pred_files:
                 pred_files = pred_json.get("test_files", [])
-            pred_files = set(map(str, pred_files))
+            pred_set: Set[str] = set()
+            for p in pred_files or []:
+                normalized = _normalize_loc_filename(p)
+                if not normalized:
+                    continue
+                pred_set.add(normalized)
 
             ref_json = json.loads(ref)
             gt_files = ref_json.get("localized_files")
             if not gt_files:
                 gt_files = ref_json.get("test_files", [])
-            gt_files = list(map(str, gt_files))
+            gt_norm: List[str] = []
+            for g in gt_files or []:
+                normalized = _normalize_loc_filename(g)
+                if not normalized:
+                    continue
+                gt_norm.append(normalized)
 
-            if not gt_files:
+            if not gt_norm:
                 # If no GT, give full credit only when prediction is also empty
-                score = 1.0 if not pred_files else 0.0
+                score = 1.0 if not pred_set else 0.0
             else:
-                matches = sum(1 for f in gt_files if f in pred_files)
-                score = matches / len(gt_files)
+                matches = sum(1 for f in gt_norm if f in pred_set)
+                score = matches / len(gt_norm)
 
             scores.append(score)
         except Exception:
@@ -835,20 +861,30 @@ def loc_file_precision(predictions: List[str], references: List[str]) -> float:
             pred_files = pred_json.get("localized_files")
             if not pred_files:
                 pred_files = pred_json.get("test_files", [])
-            pred_files = set(map(str, pred_files))
+            pred_set: Set[str] = set()
+            for p in pred_files or []:
+                normalized = _normalize_loc_filename(p)
+                if not normalized:
+                    continue
+                pred_set.add(normalized)
 
             ref_json = json.loads(ref)
             gt_files = ref_json.get("localized_files")
             if not gt_files:
                 gt_files = ref_json.get("test_files", [])
-            gt_files = set(map(str, gt_files))
+            gt_set: Set[str] = set()
+            for g in gt_files or []:
+                normalized = _normalize_loc_filename(g)
+                if not normalized:
+                    continue
+                gt_set.add(normalized)
 
-            if not pred_files:
+            if not pred_set:
                 scores.append(0.0)
                 continue
 
-            matches = sum(1 for f in pred_files if f in gt_files)
-            score = matches / len(pred_files) if pred_files else 0.0
+            matches = sum(1 for f in pred_set if f in gt_set)
+            score = matches / len(pred_set) if pred_set else 0.0
             scores.append(score)
         except Exception:
             scores.append(0.0)
@@ -873,17 +909,27 @@ def loc_func_recall(predictions: List[str], references: List[str]) -> float:
             pred_funcs = pred_json.get("localized_functions", []) or []
 
             # Deduplicate by (filename, symbol)
-            pred_pairs = {
-                (str(it.get("filename", "")), str(it.get("symbol", "")))
-                for it in pred_funcs if isinstance(it, dict)
-            }
+            pred_pairs: Set[Tuple[str, str]] = set()
+            for it in pred_funcs:
+                if not isinstance(it, dict):
+                    continue
+                filename = _normalize_loc_filename(it.get("filename", ""))
+                if not filename:
+                    continue
+                symbol = str(it.get("symbol", ""))
+                pred_pairs.add((filename, symbol))
 
             ref_json = json.loads(ref)
             ref_funcs = ref_json.get("localized_functions", []) or []
-            gt_pairs = [
-                (str(it.get("filename", "")), str(it.get("symbol", "")))
-                for it in ref_funcs if isinstance(it, dict)
-            ]
+            gt_pairs: List[Tuple[str, str]] = []
+            for it in ref_funcs:
+                if not isinstance(it, dict):
+                    continue
+                filename = _normalize_loc_filename(it.get("filename", ""))
+                if not filename:
+                    continue
+                symbol = str(it.get("symbol", ""))
+                gt_pairs.append((filename, symbol))
 
             if not gt_pairs:
                 score = 1.0 if not pred_pairs else 0.0
@@ -931,7 +977,7 @@ def _lines_by_file(obj: dict) -> Dict[str, Set[int]]:
     for item in (obj.get("localized_spans", []) or []):
         if not isinstance(item, dict):
             continue
-        filename = str(item.get("filename", "")).strip()
+        filename = _normalize_loc_filename(item.get("filename", ""))
         if not filename:
             continue
         ranges = item.get("localized_line_ranges", []) or []
@@ -953,30 +999,16 @@ def loc_line_recall(predictions: List[str], references: List[str]) -> float:
     - Invalid or empty ranges are ignored.
     - 'localized_components' is ignored for scoring.
     """
-    def expand_lines_by_file(obj: dict):
-        result = {}
-        for item in (obj.get("localized_spans", []) or []):
-            if not isinstance(item, dict):
-                continue
-            filename = str(item.get("filename", "")).strip()
-            if not filename:
-                continue
-            ranges = item.get("localized_line_ranges", []) or []
-            for rng in ranges:
-                for line in _expand_range_to_lines(str(rng)):
-                    result.setdefault(filename, set()).add(line)
-        return result
-
     scores = []
 
     for pred, ref in zip(predictions, references):
         try:
             pred_str = str(pred[0]) if isinstance(pred, list) and pred else str(pred)
             pred_json = extract_fenced_json(pred_str) or {}
-            pred_lines = expand_lines_by_file(pred_json)
+            pred_lines = _lines_by_file(pred_json)
 
             ref_json = json.loads(ref)
-            gt_lines = expand_lines_by_file(ref_json)
+            gt_lines = _lines_by_file(ref_json)
 
             total_gt = sum(len(lines) for lines in gt_lines.values())
             total_pred = sum(len(lines) for lines in pred_lines.values())
@@ -1015,17 +1047,27 @@ def loc_func_precision(predictions: List[str], references: List[str]) -> float:
             pred_json = extract_fenced_json(pred_str) or {}
             pred_funcs = pred_json.get("localized_functions", []) or []
 
-            pred_pairs = {
-                (str(it.get("filename", "")), str(it.get("symbol", "")))
-                for it in pred_funcs if isinstance(it, dict)
-            }
+            pred_pairs: Set[Tuple[str, str]] = set()
+            for it in pred_funcs:
+                if not isinstance(it, dict):
+                    continue
+                filename = _normalize_loc_filename(it.get("filename", ""))
+                if not filename:
+                    continue
+                symbol = str(it.get("symbol", ""))
+                pred_pairs.add((filename, symbol))
 
             ref_json = json.loads(ref)
             ref_funcs = ref_json.get("localized_functions", []) or []
-            gt_pairs = {
-                (str(it.get("filename", "")), str(it.get("symbol", "")))
-                for it in ref_funcs if isinstance(it, dict)
-            }
+            gt_pairs: Set[Tuple[str, str]] = set()
+            for it in ref_funcs:
+                if not isinstance(it, dict):
+                    continue
+                filename = _normalize_loc_filename(it.get("filename", ""))
+                if not filename:
+                    continue
+                symbol = str(it.get("symbol", ""))
+                gt_pairs.add((filename, symbol))
 
             if not pred_pairs:
                 scores.append(0.0)
@@ -1044,30 +1086,16 @@ def loc_line_precision(predictions: List[str], references: List[str]) -> float:
     """
     Precision metric for LocLine using expanded line numbers per file.
     """
-    def expand_lines_by_file(obj: dict):
-        result = {}
-        for item in (obj.get("localized_spans", []) or []):
-            if not isinstance(item, dict):
-                continue
-            filename = str(item.get("filename", "")).strip()
-            if not filename:
-                continue
-            ranges = item.get("localized_line_ranges", []) or []
-            for rng in ranges:
-                for line in _expand_range_to_lines(str(rng)):
-                    result.setdefault(filename, set()).add(line)
-        return result
-
     scores = []
 
     for pred, ref in zip(predictions, references):
         try:
             pred_str = str(pred[0]) if isinstance(pred, list) and pred else str(pred)
             pred_json = extract_fenced_json(pred_str) or {}
-            pred_lines = expand_lines_by_file(pred_json)
+            pred_lines = _lines_by_file(pred_json)
 
             ref_json = json.loads(ref)
-            gt_lines = expand_lines_by_file(ref_json)
+            gt_lines = _lines_by_file(ref_json)
 
             total_pred = sum(len(lines) for lines in pred_lines.values())
             if total_pred == 0:
